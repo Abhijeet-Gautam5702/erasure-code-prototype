@@ -1,5 +1,7 @@
 use std::io;
 
+use crate::gf256_constants::GF256_INVERSE_TABLE;
+
 pub type ByteMatrix = Vec<Vec<Byte>>;
 pub type Byte = u8;
 
@@ -298,5 +300,20 @@ mod tests {
             err.to_string()
                 .contains("Multiplication Condition Not Satisfied")
         );
+    }
+
+    #[test]
+    fn inverse_table_matches_field_multiplication() {
+        assert_eq!(GF256_INVERSE_TABLE[0], 0x00);
+
+        for value in 1..=u8::MAX {
+            let inverse = GF256_INVERSE_TABLE[value as usize];
+            assert_ne!(inverse, 0x00, "missing inverse for 0x{value:02x}");
+            assert_eq!(
+                field_multiply(value, inverse),
+                0x01,
+                "incorrect inverse for 0x{value:02x}"
+            );
+        }
     }
 }
