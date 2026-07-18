@@ -134,11 +134,11 @@ fn field_multiply(mut a: Byte, mut b: Byte) -> Byte {
     while b > 0 {
         // current coefficent of b == 1
         // include the current multiple of a
-        if _lsb(b) == 1 {
+        if lsb(b) == 1 {
             res = res ^ a;
         }
 
-        let msb_of_a = _msb(a);
+        let msb_of_a = msb(a);
 
         // increase degree of a by 1 (equivalent to multiplying by x)
         a = a << 1;
