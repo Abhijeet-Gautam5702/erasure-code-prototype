@@ -1,9 +1,10 @@
-use std::io::{self, ErrorKind::InvalidData};
+use std::io;
 
 pub type ByteMatrix = Vec<Vec<Byte>>;
 pub type Byte = u8;
 
-const ZERO_BYTE: u8 = 0u8;
+const ZERO_BYTE: Byte = 0b00;
+const REDUCING_POLYNOMIAL_MODULUS: Byte = 0x1d;
 
 fn is_valid_matrix(mat: &ByteMatrix) -> Result<(usize, usize), io::Error> {
     let m: usize = mat.len();
@@ -107,7 +108,10 @@ pub fn multiply_matrices(a: &ByteMatrix, b: &ByteMatrix) -> Result<ByteMatrix, i
     let (r1, c1) = is_valid_matrix(a)?;
     let (r2, c2) = is_valid_matrix(b)?;
     if c1 != r2 {
-        let err_msg = format!("# of cols in Mat-1 ({}) != # of rows in Mat-2 ({})", c1, r2);
+        let err_msg = format!(
+            "Multiplication Condition Not Satisfied. # of cols in Mat-1 ({}) != # of rows in Mat-2 ({})",
+            c1, r2
+        );
         return Err(io::Error::new(io::ErrorKind::InvalidInput, err_msg));
     }
     let n = c1;
@@ -115,10 +119,9 @@ pub fn multiply_matrices(a: &ByteMatrix, b: &ByteMatrix) -> Result<ByteMatrix, i
     for i in 0..r1 {
         for j in 0..c2 {
             let row_i = get_row(a, i)?;
-            let col_j = get_col(b, j)?;
             let mut p_ij: Byte = ZERO_BYTE;
             for x in 0..n {
-                p_ij = p_ij ^ field_multiply(&row_i[x], &col_j[x]);
+                p_ij = p_ij ^ field_multiply(row_i[x], b[x][j]); // field addition
             }
             product_mat[i][j] = p_ij;
         }
@@ -126,8 +129,37 @@ pub fn multiply_matrices(a: &ByteMatrix, b: &ByteMatrix) -> Result<ByteMatrix, i
     return Ok(product_mat);
 }
 
-fn field_multiply(a: &Byte, b: &Byte) -> Byte {
-    Ok(vec![])
+fn field_multiply(mut a: Byte, mut b: Byte) -> Byte {
+    let mut res: Byte = ZERO_BYTE;
+    while b > 0 {
+        // current coefficent of b == 1
+        // include the current multiple of a
+        if _lsb(b) == 1 {
+            res = res ^ a;
+        }
+
+        let msb_of_a = _msb(a);
+
+        // increase degree of a by 1 (equivalent to multiplying by x)
+        a = a << 1;
+
+        // we got a term with degree >= 8 => reduce it using REDUCING_POLYNOMIAL_MODULUS
+        if msb_of_a == 1 {
+            a = a ^ REDUCING_POLYNOMIAL_MODULUS;
+        }
+
+        // examine the next coefficient of b
+        b = b >> 1;
+    }
+    return res;
+}
+
+fn lsb(b: Byte) -> Byte {
+    return b & 0x01;
+}
+
+fn msb(a: Byte) -> Byte {
+    return (a & (0x01 << 7)) >> 7;
 }
 
 pub fn invert_matrix(mat: &ByteMatrix) -> Result<ByteMatrix, io::Error> {
