@@ -1,9 +1,14 @@
-use std::io;
+use std::io::{self, ErrorKind::InvalidInput};
 
 use crate::gf256_constants::GF256_INVERSE_TABLE;
 
 pub type ByteMatrix = Vec<Vec<Byte>>;
 pub type Byte = u8;
+
+enum ElementaryRowOp {
+    PivotNormalisation,
+    RowElimination,
+}
 
 const ZERO_BYTE: Byte = 0b00;
 
@@ -46,12 +51,13 @@ fn is_valid_matrix(mat: &ByteMatrix) -> Result<(usize, usize), io::Error> {
     return Ok((m, n));
 }
 
-pub fn is_square(mat: &ByteMatrix) -> Result<bool, io::Error> {
+pub fn is_square(mat: &ByteMatrix) -> Result<usize, io::Error> {
     let (m, n) = is_valid_matrix(mat)?;
     if m == n {
-        return Ok(true);
+        return Ok(m);
     }
-    return Ok(false);
+    let err_msg = format!("matrix is not square. m={}, n={}", m, n);
+    return Err(io::Error::new(io::ErrorKind::InvalidData, err_msg));
 }
 
 pub fn is_rectangular(mat: &ByteMatrix) -> Result<bool, io::Error> {
@@ -193,8 +199,101 @@ fn msb(a: Byte) -> Byte {
     return (a & (0x01 << 7)) >> 7;
 }
 
-pub fn invert_matrix(mat: &ByteMatrix) -> Result<(), io::Error> {
+/// Computes the inverse of a square matrix over `GF(2^8)`.
+///
+/// Each byte is treated as a field element, not as an ordinary integer. This
+/// uses Gauss-Jordan elimination on the augmented matrix `[mat | I]`, with
+/// field multiplication for row scaling and XOR-based subtraction for row
+/// elimination. The returned matrix satisfies `mat * inverse = I`.
+///
+/// # Errors
+///
+/// Returns an error when `mat` is invalid or non-square, or when it is
+/// singular and therefore has no inverse.
+pub fn invert_matrix(mat: &ByteMatrix) -> Result<ByteMatrix, io::Error> {
+    let n: usize = is_square(mat)?;
+    let mut a = mat.clone();
+    let mut res = build_identity_matrix(n)?;
+    for i in 0..n {
+        // swap with a row with non-zero pivot
+        if a[i][i] == 0 {
+            swap_rows(&mut a, &mut res, n, i)?;
+        }
+        // normalise the pivot
+        // multiply each element of row-i with inverse(a[i][i])
+        let mult_factor = field_inverse(a[i][i])?;
+        for c in 0..n {
+            a[i][c] = field_multiply(mult_factor, a[i][c]);
+            res[i][c] = field_multiply(mult_factor, res[i][c]);
+        }
+
+        // make all non-pivot elements in the column-i = 0
+        for r in 0..n {
+            if r == i {
+                continue;
+            }
+            let mult_factor = a[r][i];
+            for c in 0..n {
+                a[r][c] = field_subtract(a[r][c], field_multiply(mult_factor, a[i][c]));
+                res[r][c] = field_subtract(res[r][c], field_multiply(mult_factor, res[i][c]));
+            }
+        }
+    }
+    Ok(res)
+}
+
+fn swap_rows(
+    a: &mut ByteMatrix,
+    res: &mut ByteMatrix,
+    n: usize,
+    i: usize,
+) -> Result<(), io::Error> {
+    let mut swap_done = false;
+    for r in (i + 1)..n {
+        if a[r][i] != 0b00 {
+            let mut tmp: Vec<Byte> = a[i].clone();
+            a[i] = a[r].clone();
+            a[r] = tmp;
+
+            tmp = res[i].clone();
+            res[i] = res[r].clone();
+            res[r] = tmp;
+
+            swap_done = true;
+            break;
+        }
+    }
+    if !swap_done {
+        return Err(io::Error::new(InvalidInput, "Matrix is singular"));
+    }
     Ok(())
+}
+
+/// Returns the multiplicative inverse of a nonzero `GF(2^8)` field element.
+///
+/// The inverse is looked up from `GF256_INVERSE_TABLE`, whose values use the
+/// same reducing polynomial as [`field_multiply`]. For a nonzero `a`, the
+/// returned value satisfies `field_multiply(a, inverse) == 1`.
+///
+/// # Errors
+///
+/// Returns an error for zero because it has no multiplicative inverse.
+fn field_inverse(a: Byte) -> Result<Byte, io::Error> {
+    if a == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "zero has no multiplicative inverse",
+        ));
+    }
+    return Ok(GF256_INVERSE_TABLE[a as usize]);
+}
+
+fn field_subtract(a: Byte, b: Byte) -> Byte {
+    // In GF(2^8), each bit is a polynomial coefficient in GF(2).
+    // Since arithmetic is modulo 2
+    // each element is its own additive inverse
+    // so b = -b
+    return a ^ b;
 }
 
 #[cfg(test)]
@@ -315,5 +414,44 @@ mod tests {
                 "incorrect inverse for 0x{value:02x}"
             );
         }
+    }
+
+    #[test]
+    fn invert_matrix_returns_a_two_sided_inverse() {
+        let matrix: ByteMatrix = vec![vec![0x02, 0x01], vec![0x01, 0x01]];
+        let inverse = invert_matrix(&matrix).unwrap();
+        let identity = build_identity_matrix(2).unwrap();
+
+        assert_eq!(multiply_matrices(&matrix, &inverse).unwrap(), identity);
+        assert_eq!(multiply_matrices(&inverse, &matrix).unwrap(), identity);
+    }
+
+    #[test]
+    fn invert_matrix_swaps_rows_when_the_pivot_is_zero() {
+        let matrix: ByteMatrix = vec![vec![0x00, 0x01], vec![0x01, 0x00]];
+
+        let inverse = invert_matrix(&matrix).unwrap();
+
+        assert_eq!(inverse, matrix);
+    }
+
+    #[test]
+    fn invert_matrix_rejects_a_singular_matrix() {
+        let singular: ByteMatrix = vec![vec![0x01, 0x01], vec![0x01, 0x01]];
+
+        let err = invert_matrix(&singular).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("Matrix is singular"));
+    }
+
+    #[test]
+    fn invert_matrix_rejects_a_non_square_matrix() {
+        let non_square: ByteMatrix = vec![vec![0x01, 0x02, 0x03], vec![0x04, 0x05, 0x06]];
+
+        let err = invert_matrix(&non_square).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("matrix is not square"));
     }
 }
